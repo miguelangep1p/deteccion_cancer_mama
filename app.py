@@ -32,6 +32,24 @@ class_names = ["Benign", "Malignant"]
 scaler = joblib.load("scaler_xgboost.pkl")
 booster = xgb.Booster()
 booster.load_model("best_xgboost_model.json")
+# =======================
+# AGREGAR ENSEMBLE
+# =======================
+def ensemble_predict(img_tensor, x_tabular, cnn_weight=0.6):
+    # CNN
+    with torch.no_grad():
+        outputs = model_cnn(img_tensor)
+        prob_cnn = torch.softmax(outputs, dim=1)[0,1].item()  # prob maligno
+
+    # XGB
+    x_scaled = scaler.transform(x_tabular)
+    dmatrix = xgb.DMatrix(x_scaled)
+    prob_xgb = booster.predict(dmatrix)[0]  # prob maligno
+
+    # Ensemble
+    prob_final = cnn_weight * prob_cnn + (1-cnn_weight) * prob_xgb
+    pred = 1 if prob_final > 0.5 else 0
+    return pred, prob_final
 
 # =======================
 # MULTILENGUAJE
@@ -99,7 +117,7 @@ txt = languages[lang_choice]
 
 st.sidebar.title(txt["sidebar_title"])
 option = st.sidebar.radio(txt["sidebar_option"], 
-                          ["CNN - Clasificación de Imágenes", "XGBoost - Clasificación Tabular"])
+                          ["CNN - Clasificación de Imágenes", "XGBoost - Clasificación Tabular", "Ensemble - CNN + XGBoost"])
 
 # --- Encabezado principal ---
 st.title(txt["title"])
@@ -144,30 +162,6 @@ if option == "XGBoost - Clasificación Tabular":
     st.header(txt["xgb_title"])
 
     # ----------------------------------------------------------
-    st.markdown(txt["xgb_manual"])
-    cols = st.columns(3)
-    inputs = []
-
-    for i, fname in enumerate(feature_names):
-        with cols[i % 3]:
-            val = st.number_input(fname, value=0.0, format="%.4f")
-            inputs.append(val)
-
-    if st.button("🔮 Predecir / Predict"):
-        try:
-            features = np.array(inputs).reshape(1, -1)
-            features_scaled = scaler.transform(features)
-            dmatrix = xgb.DMatrix(features_scaled)
-            preds = booster.predict(dmatrix)
-            prob = preds[0]
-            pred_class = 1 if prob >= 0.5 else 0
-
-            st.metric(label=txt["prediction"], value=f"Clase {pred_class}")
-            st.write(f"📊 Probabilidad / Probability: **{prob*100:.2f}%**")
-
-        except Exception as e:
-            st.error(f"{txt['error_pred']}: {e}")
-
     # ----------------------------------------------------------
     st.markdown(txt["xgb_csv"])
     uploaded_csv = st.file_uploader(txt["upload_csv"], type=["csv"])
@@ -192,6 +186,60 @@ if option == "XGBoost - Clasificación Tabular":
 
         except Exception as e:
             st.error(f"{txt['error_csv']}: {e}")
+
+# =======================
+# SECCIÓN: ENSEMBLE
+# =======================
+if option == "Ensemble - CNN + XGBoost":
+    st.header("🤝 Ensemble (CNN + XGBoost)")
+
+    uploaded_file = st.file_uploader(txt["upload_img"], 
+                                     type=["jpg", "jpeg", "png"])
+
+    uploaded_csv = st.file_uploader(txt["upload_csv"], type=["csv"])
+
+    if uploaded_file is not None and uploaded_csv is not None:
+        col1, col2 = st.columns([1, 2])
+        with col1:
+            image = Image.open(uploaded_file).convert("RGB")
+            st.image(image, caption="🖼️ Imagen cargada", use_container_width=True)
+
+        with col2:
+            # --- Preprocesar imagen ---
+            img_tensor = val_transform(image).unsqueeze(0).to(device)
+
+            try:
+                # --- Leer CSV ---
+                data = pd.read_csv(uploaded_csv)
+                st.subheader(txt["preview"])
+                st.dataframe(data.head())
+
+                # --- Predecir fila por fila ---
+                results = []
+                for i in range(len(data)):
+                    x_tabular = data.iloc[i].values.reshape(1, -1)
+                    pred, prob_final = ensemble_predict(img_tensor, x_tabular)
+                    results.append({
+                        "Fila": i+1,
+                        txt["prediction"]: class_names[pred],
+                        "Probabilidad Maligno (%)": prob_final * 100,
+                        "Probabilidad Benigno (%)": (1 - prob_final) * 100
+                    })
+
+                results_df = pd.DataFrame(results)
+
+                st.subheader("📊 Resultados Ensemble")
+                st.dataframe(results_df)
+
+            except Exception as e:
+                st.error(f"{txt['error_pred']}: {e}")
+
+    elif uploaded_file is None:
+        st.info("📂 Primero sube una **imagen**.")
+    elif uploaded_csv is None:
+        st.info("📂 Ahora sube un **CSV** con los features tabulares.")
+
+            
 
 # =======================
 # FOOTER
